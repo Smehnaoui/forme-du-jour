@@ -3,7 +3,9 @@
 Coach de musculation personnel qui adapte chaque séance à ton sommeil (Google Health) et à ton ressenti.
 Objectif : **recomposition** (perdre du gras, prendre du muscle).
 
-## Lancer l'app
+**En ligne :** https://smehnaoui.github.io/forme-du-jour/ (GitHub Pages, mis à jour à chaque `git push`)
+
+## Lancer l'app en local
 
 ```bash
 node server.js
