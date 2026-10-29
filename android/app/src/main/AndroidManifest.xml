@@ -17,6 +17,7 @@
         android:roundIcon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:supportsRtl="true"
+        android:manageSpaceActivity="com.google.androidbrowserhelper.trusted.ManageDataLauncherActivity"
         android:theme="@android:style/Theme.Translucent.NoTitleBar">
 
         <meta-data
@@ -56,6 +57,15 @@
                     android:host="smehnaoui.github.io"
                     android:pathPrefix="/forme-du-jour" />
             </intent-filter>
+        </activity>
+
+        <!-- Requis par LauncherActivity (raccourci « Gérer les données du site ») -->
+        <activity
+            android:name="com.google.androidbrowserhelper.trusted.ManageDataLauncherActivity"
+            android:exported="false">
+            <meta-data
+                android:name="android.support.customtabs.trusted.MANAGE_SPACE_URL"
+                android:value="@string/launch_url" />
         </activity>
 
         <service
