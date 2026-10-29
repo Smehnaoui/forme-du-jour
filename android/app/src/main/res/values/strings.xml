@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Forme du jour</string>
+    <string name="launch_url">https://smehnaoui.github.io/forme-du-jour/#/today</string>
+    <!-- Doit correspondre à https://smehnaoui.github.io/.well-known/assetlinks.json pour masquer la barre d'adresse -->
+    <string name="asset_statements" translatable="false">[{\"relation\": [\"delegate_permission/common.handle_all_urls\"], \"target\": {\"namespace\": \"web\", \"site\": \"https://smehnaoui.github.io\"}}]</string>
+    <color name="background">#0D1117</color>
+</resources>

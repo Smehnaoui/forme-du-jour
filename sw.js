@@ -1,6 +1,6 @@
 // Cache hors ligne : réseau d'abord pour l'app, cache en secours.
-const CACHE = "forme-v2";
-const ASSETS = ["./", "index.html", "styles.css", "manifest.webmanifest", "icon.svg",
+const CACHE = "forme-v3";
+const ASSETS = ["./", "index.html", "styles.css", "manifest.webmanifest", "icon.svg", "icons/icon-192.png",
   "js/app.js", "js/config.js", "js/engine.js", "js/exercises.js", "js/store.js", "js/google-health.js"];
 
 self.addEventListener("install", (e) => {

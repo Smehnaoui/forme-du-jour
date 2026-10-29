@@ -1,2 +1,11 @@
 .claude/
 node_modules/
+
+# Android : clé de signature et fichiers de build (ne jamais publier la clé)
+android/keystore/
+android/local.properties
+android/.gradle/
+android/build/
+android/app/build/
+*.apk
+*.aab
