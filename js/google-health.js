@@ -10,8 +10,11 @@ export const SCOPES = {
   metrics: AUTH + "health_metrics_and_measurements.readonly",
   activity: AUTH + "activity_and_fitness.readonly",
 };
+// Adresse du compte : sert d'indice (login_hint) pour que Google ne redemande plus de choisir le compte.
+const IDENTITY = "openid email";
 const API = "https://health.googleapis.com/v4/users/me/dataTypes";
 const TOKEN_KEY = "forme.gtoken";
+const EMAIL_KEY = "forme.gemail";
 
 /** Données lues et accès Google correspondant. */
 export const SOURCES = {
@@ -31,7 +34,8 @@ class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 
-function loadGis() {
+/** Précharge le script Google : la fenêtre s'ouvre alors directement au clic (pas de blocage de popup). */
+export function loadGis() {
   if (window.google?.accounts?.oauth2) return Promise.resolve();
   return new Promise((resolve, reject) => {
     const s = document.createElement("script");
@@ -65,16 +69,34 @@ export function grantedScopes() {
   return (readToken()?.scope || "").split(" ").filter(Boolean);
 }
 
-/** Ouvre la fenêtre de consentement Google et renvoie un jeton d'accès. */
-export async function authorize(clientId, { silent = false } = {}) {
+/** Compte Google mémorisé à la première connexion (null avant). */
+export function accountEmail() {
+  try { return localStorage.getItem(EMAIL_KEY) || null; } catch { return null; }
+}
+
+async function rememberEmail(token) {
+  try {
+    const res = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", { headers: { Authorization: `Bearer ${token}` } });
+    const info = res.ok ? await res.json() : null;
+    if (info?.email) localStorage.setItem(EMAIL_KEY, info.email);
+  } catch { /* sans adresse, Google affichera simplement le choix du compte */ }
+}
+
+/**
+ * Renvoie un jeton d'accès valide. Le jeton Google dure 1 h ; au-delà, on en redemande un en
+ * indiquant le compte déjà utilisé : Google n'affiche alors ni le choix du compte ni le consentement
+ * (la fenêtre s'ouvre et se referme seule). Le consentement complet n'est demandé qu'à la première connexion.
+ */
+export async function authorize(clientId, { force = false, first = false } = {}) {
   const cached = readToken();
-  if (cached && (silent || Object.values(SCOPES).every((sc) => cached.scope?.includes(sc)))) return cached.access_token;
+  if (cached && !force) return cached.access_token;
   if (!clientId) throw new Error("Ajoute ton Client ID Google dans Profil → Google Health.");
   await loadGis();
+  const hint = accountEmail();
   return new Promise((resolve, reject) => {
     tokenClient = google.accounts.oauth2.initTokenClient({
       client_id: clientId,
-      scope: Object.values(SCOPES).join(" "),
+      scope: [...Object.values(SCOPES), IDENTITY].join(" "),
       include_granted_scopes: true,
       callback: (resp) => {
         if (resp.error) return reject(new Error(resp.error_description || resp.error));
@@ -85,17 +107,19 @@ export async function authorize(clientId, { silent = false } = {}) {
             scope: resp.scope || SCOPES.sleep,
           }));
         } catch { /* ignore */ }
-        resolve(resp.access_token);
+        if (!hint) rememberEmail(resp.access_token).finally(() => resolve(resp.access_token));
+        else resolve(resp.access_token);
       },
-      error_callback: (err) => reject(new Error(err?.message || "Connexion Google annulée.")),
+      error_callback: (err) => reject(new Error(err?.type === "popup_closed" ? "Connexion Google annulée." : err?.message || "Connexion Google annulée.")),
     });
-    tokenClient.requestAccessToken({ prompt: silent ? "" : "consent" });
+    tokenClient.requestAccessToken(hint ? { prompt: "", login_hint: hint } : { prompt: first ? "consent" : "" });
   });
 }
 
 export function disconnect() {
   const t = readToken();
   clearToken();
+  try { localStorage.removeItem(EMAIL_KEY); } catch { /* ignore */ }
   if (t && window.google?.accounts?.oauth2) google.accounts.oauth2.revoke(t.access_token, () => {});
 }
 
@@ -362,7 +386,8 @@ async function fetchVitals(token, days = 60) {
  * (session expirée, hors ligne…). `status` dit, pour chaque donnée : ok, empty, denied ou error.
  */
 export async function fetchAll(clientId) {
-  const token = await authorize(clientId, { silent: true });
+  const token = readToken()?.access_token;
+  if (!token) throw new HttpError(401, "Session Google expirée, appuie sur Synchroniser.");
   const granted = grantedScopes();
   const allowed = (k) => !granted.length || granted.includes(SCOPES[SOURCES[k].scope]);
 

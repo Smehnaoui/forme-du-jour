@@ -1,22 +1,29 @@
-// Moteur d'entraînement : sommeil + santé + ressenti → score de forme → séance adaptée.
+// Moteur d'entraînement : récupération du matin (sommeil, VFC, FC repos, ressenti) − fatigue de la
+// journée (pas, sport, heures debout) = énergie du jour → séance adaptée.
 // Toutes les données Google Health sont facultatives : sans elles, le score repose sur le sommeil
-// (ou une nuit moyenne supposée) et le ressenti, comme avant.
-import { EXERCISES, pickExercise, MOBILITY } from "./exercises.js";
+// (ou une nuit moyenne supposée) et le ressenti.
+import { EXERCISES, MOVES, RECOVERY, pickExercise } from "./exercises.js";
 
 export const INTENSITY = {
-  full:     { key: "full",     label: "Pleine forme",  short: "Intense",   icon: "flame",   color: "var(--c-full)" },
-  normal:   { key: "normal",   label: "En forme",      short: "Standard",  icon: "bolt",    color: "var(--c-normal)" },
-  light:    { key: "light",    label: "Fatigué",       short: "Léger",     icon: "feather", color: "var(--c-light)" },
-  recovery: { key: "recovery", label: "Récupération",  short: "Récup",     icon: "moon",    color: "var(--c-recovery)" },
+  peak:     { key: "peak",     label: "Au top",        short: "Perf",     icon: "rocket" },
+  full:     { key: "full",     label: "Pleine forme",  short: "Intense",  icon: "flame" },
+  normal:   { key: "normal",   label: "En forme",      short: "Standard", icon: "bolt" },
+  light:    { key: "light",    label: "Fatigué",       short: "Léger",    icon: "feather" },
+  recovery: { key: "recovery", label: "À recharger",   short: "Récup",    icon: "moon" },
 };
 
+/** Seuils de score de chaque niveau (du plus haut au plus bas). */
+export const THRESHOLDS = [["peak", 85], ["full", 68], ["normal", 50], ["light", 32], ["recovery", 0]];
+
 export function levelOf(score) {
-  return score >= 75 ? "full" : score >= 52 ? "normal" : score >= 32 ? "light" : "recovery";
+  return THRESHOLDS.find(([, min]) => score >= min)[0];
 }
 
 const mean = (a) => a.reduce((t, x) => t + x, 0) / a.length;
 const stdev = (a) => { const m = mean(a); return Math.sqrt(mean(a.map((x) => (x - m) ** 2))); };
 const clamp = (v, lo = 0, hi = 100) => Math.max(lo, Math.min(hi, v));
+const NO_INTENSE = 67;  // plafond « pas de séance intense »
+const NO_PEAK = 84;     // plafond « pas de séance record »
 
 // ───────────────────────── Score de sommeil
 
@@ -78,7 +85,7 @@ export function versusBaseline(daily = {}, key, today, { days = 60, min = 7, log
 
 // ───────────────────────── Charge d'entraînement
 
-const LOAD_RPE = { full: 8, normal: 7, light: 5, recovery: 2 };
+const LOAD_RPE = { peak: 8.5, full: 8, normal: 7, light: 5, recovery: 2 };
 
 /** Charge aiguë (7 j) / chronique (28 j) à partir des séances de l'app et des sports enregistrés par Google. */
 export function trainingLoad(sessions = [], workouts = [], today = dateKey()) {
@@ -94,35 +101,89 @@ export function trainingLoad(sessions = [], workouts = [], today = dateKey()) {
   return { acute, chronic, ratio: chronic > 0 ? acute / chronic : null };
 }
 
-// ───────────────────────── Score de forme
+// ───────────────────────── Fatigue de la journée
+
+/** Journée ressentie (saisie) : 1 calme, 2 active, 3 très physique → points d'énergie perdus. */
+const DAY_DRAIN = [0, 0, 8, 16];
 
 /**
- * Score de forme du jour.
- * Sommeil 35 · VFC 25 · ressenti 20 · FC repos 10 · charge 10. Une donnée absente sort du calcul
- * et les autres sont repondérées. Garde-fous ensuite (maladie, dette de sommeil, surcharge…).
+ * Énergie déjà dépensée aujourd'hui : pas au-delà de ton rythme habituel, sport enregistré par Google,
+ * journée physique déclarée, longue journée debout (amplifiée après une nuit courte). Plafonné à 30 points.
  */
-export function readiness({ night, recentNights = [], checkin, profile, recentSessions = [], health = {}, workouts = [], today = dateKey() }) {
-  const reasons = [];
+export function dayStrain({ daily = {}, workouts = [], today = dateKey(), now = new Date(), night = null, checkin = null } = {}) {
+  const parts = [];
+  let drain = 0;
+
+  const wake = night?.wake ? new Date(night.wake) : new Date(new Date(now).setHours(7, 0, 0, 0));
+  const awakeH = Math.max(0, (now - wake) / 3600_000);
+
+  const sport = workouts.filter((w) => w.date === today && !w.strength);
+  const sportMin = sport.reduce((t, w) => t + (w.minutes || 0), 0);
+  if (sportMin >= 15) {
+    drain += Math.min(20, sportMin * 0.3);
+    parts.push({ key: "sport", text: `${Math.round(sportMin)} min de ${sport[0].name} aujourd'hui` });
+  }
+
+  const steps = daily[today]?.steps ?? null;
+  if (steps != null) {
+    const past = [];
+    for (let i = 1; i <= 14; i++) { const v = daily[addDays(today, -i)]?.steps; if (v > 0) past.push(v); }
+    const usual = past.length >= 5 ? mean(past) : 8000;
+    const expected = usual * Math.min(1, awakeH / 15); // ce que tu marches d'habitude à cette heure-ci
+    let d = clamp(((steps - expected) / 1000) * 2, 0, 12) + (steps >= 15000 ? 3 : 0);
+    if (sportMin >= 15) d /= 2; // une partie des pas vient déjà de la séance de sport comptée au-dessus
+    if (d >= 3) parts.push({ key: "steps", text: `${fmtK(steps)} pas déjà aujourd'hui` });
+    drain += d;
+  }
+
+  const declared = DAY_DRAIN[checkin?.day || 0];
+  if (declared > drain) {
+    drain = declared;
+    parts.push({ key: "day", text: checkin.day === 3 ? "Journée très physique" : "Journée active" });
+  }
+
+  if (awakeH > 12) {
+    const d = Math.min(8, (awakeH - 12) * 2) * (night && night.hours < 6.5 ? 1.5 : 1);
+    if (d >= 3) parts.push({ key: "awake", text: `Debout depuis ${Math.floor(awakeH)} h` });
+    drain += d;
+  }
+
+  return { drain: Math.round(Math.min(30, drain)), parts, steps, awakeH, sportMin };
+}
+
+// ───────────────────────── Énergie du jour
+
+/**
+ * Énergie du jour (0–100) = récupération du matin − fatigue de la journée.
+ * Récupération : sommeil 35 · VFC 25 · ressenti 20 · FC repos 10 · charge 10 ; une donnée absente sort du
+ * calcul et les autres sont repondérées. Garde-fous ensuite (maladie, dette de sommeil, surcharge…).
+ */
+export function readiness({ night, recentNights = [], checkin, profile, recentSessions = [], health = {}, workouts = [], today = dateKey(), now = new Date() }) {
+  const reasons = [];   // { text, tone: "good" | "warn" | "bad" }
   const metrics = {};
   const parts = [];
+  const why = (text, tone = "warn") => reasons.push({ text, tone });
 
   const s = sleepScore(night, profile.sleepTarget);
-  if (!s) reasons.push("Pas de données de sommeil : on part sur une nuit moyenne.");
   parts.push({ key: "sleep", w: 35, v: s ? s.score : 60 }); // inconnu : on suppose une nuit moyenne
 
   const energy = checkin?.energy ?? 3;      // 1 = vidé, 5 = au top
   const soreness = checkin?.soreness ?? 2;  // 1 = rien, 5 = très courbaturé
-  parts.push({ key: "feel", w: 20, v: ((energy - 1) / 4) * 100 * 0.55 + ((5 - soreness) / 4) * 100 * 0.45 });
+  const feel = ((energy - 1) / 4) * 100 * 0.55 + ((5 - soreness) / 4) * 100 * 0.45;
+  parts.push({ key: "feel", w: 20, v: feel });
 
   const daily = health.daily || {};
   const hrv = versusBaseline(daily, "hrv", today, { log: true });
+  let recov = [];
   if (hrv) {
     metrics.hrv = hrv;
     if (hrv.base != null) {
-      parts.push({ key: "hrv", w: 25, v: clamp(55 + hrv.z * 20) });
+      const v = clamp(55 + hrv.z * 20);
+      parts.push({ key: "hrv", w: 25, v });
+      recov.push(v);
       const pct = Math.round((hrv.value / hrv.base - 1) * 100);
-      if (hrv.z <= -1) reasons.push(`VFC nettement sous ta moyenne (${pct} %) : récupération incomplète.`);
-      else if (hrv.z >= 0.75) reasons.push(`VFC au-dessus de ta moyenne (+${pct} %) : bonne récupération.`);
+      if (hrv.z <= -1) why(`VFC basse (${pct} %) : récupération incomplète`, "bad");
+      else if (hrv.z >= 0.75) why(`VFC haute (+${pct} %) : bien récupéré`, "good");
     }
   }
   const rhr = versusBaseline(daily, "rhr", today);
@@ -130,8 +191,10 @@ export function readiness({ night, recentNights = [], checkin, profile, recentSe
     metrics.rhr = rhr;
     if (rhr.base != null) {
       const delta = rhr.value - rhr.base;
-      parts.push({ key: "rhr", w: 10, v: clamp(70 - delta * 6) });
-      if (delta >= 5) reasons.push(`FC au repos haute (+${Math.round(delta)} bpm sur ta moyenne).`);
+      const v = clamp(70 - delta * 6);
+      parts.push({ key: "rhr", w: 10, v });
+      recov.push(v);
+      if (delta >= 5) why(`FC au repos haute (+${Math.round(delta)} bpm)`, "bad");
     }
   }
   const load = trainingLoad(recentSessions, workouts, today);
@@ -154,12 +217,12 @@ export function readiness({ night, recentNights = [], checkin, profile, recentSe
   if (spo2 != null && spo2 < 92) signals.push("oxygénation");
   if (signals.length >= 2) {
     score = Math.min(score, 30);
-    reasons.push(`Signes possibles de maladie (${signals.join(", ")}) : repos aujourd'hui.`);
+    why(`Signes possibles de maladie (${signals.join(", ")})`, "bad");
   } else if (rhr?.base != null && rhr.value - rhr.base >= 5) {
     const y = daily[addDays(today, -1)]?.rhr;
     if (y != null && y - rhr.base >= 5) {
-      score = Math.min(score, 51);
-      reasons.push("FC au repos haute deux matins de suite : on allège.");
+      score = Math.min(score, 49);
+      why("FC au repos haute deux matins de suite", "bad");
     }
   }
 
@@ -169,49 +232,67 @@ export function readiness({ night, recentNights = [], checkin, profile, recentSe
     const avg = last3.reduce((a, n) => a + n.hours, 0) / last3.length;
     if (avg < 6) {
       score = Math.min(score, 62);
-      reasons.push(`Dette de sommeil : ${fmtHours(avg)} en moyenne sur ${last3.length} nuits.`);
+      why(`Dette de sommeil : ${fmtHours(avg)} en moyenne sur ${last3.length} nuits`);
     }
   }
   const last7 = recentNights.slice(0, 7).filter(Boolean);
   if (last7.length >= 3) {
     const avg = last7.reduce((a, n) => a + n.hours, 0) / last7.length;
-    if (avg < profile.sleepTarget - 1 && score >= 75) {
-      score = 74;
-      reasons.push(`Sommeil court cette semaine (${fmtHours(avg)} en moyenne) : pas de séance intense.`);
+    if (avg < profile.sleepTarget - 1 && score > NO_INTENSE) {
+      score = NO_INTENSE;
+      why(`Semaine de sommeil courte (${fmtHours(avg)} en moyenne)`);
     }
   }
-  if (night && night.hours < 5) reasons.push(`Nuit très courte (${fmtHours(night.hours)}).`);
-  else if (night && night.hours < profile.sleepTarget - 1.5) reasons.push(`Nuit courte (${fmtHours(night.hours)} pour un objectif de ${fmtHours(profile.sleepTarget)}).`);
-  if (soreness >= 4) reasons.push("Courbatures marquées : on allège le volume.");
-  if (energy <= 2) reasons.push("Énergie basse ce matin.");
+  if (!night) why("Pas de nuit enregistrée : nuit moyenne supposée");
+  else if (night.hours < 5) why(`Nuit très courte (${fmtHours(night.hours)})`, "bad");
+  else if (night.hours < profile.sleepTarget - 1.5) why(`Nuit courte (${fmtHours(night.hours)})`);
+  else if (s?.score >= 80) why(`Très bonne nuit (${fmtHours(night.hours)})`, "good");
+  if (soreness >= 4) why("Courbatures marquées");
+  if (energy <= 2) why("Énergie basse ce matin");
+  if (energy >= 5 && soreness <= 2) why("Tu te sens au top", "good");
 
   // Surcharge : beaucoup plus d'entraînement cette semaine que d'habitude
   if (load?.ratio > 1.5) {
-    score = Math.min(score, 51);
-    reasons.push("Charge de la semaine bien au-dessus de ton habitude : on lève le pied.");
+    score = Math.min(score, 49);
+    why("Charge de la semaine bien au-dessus de ton habitude");
   }
 
   // Sport d'endurance la veille (course, vélo, foot…) : jambes à ménager
   const yesterday = addDays(today, -1);
   const legs = workouts.filter((w) => w.date === yesterday && w.legs).reduce((t, w) => t + (w.minutes || 0), 0);
   if (legs >= 45) {
-    score = Math.min(score, 74);
-    reasons.push(`${Math.round(legs)} min de sport hier (course, vélo…) : pas de séance intense.`);
+    score = Math.min(score, NO_INTENSE);
+    why(`${Math.round(legs)} min de sport hier : jambes à ménager`);
   }
 
   // Trois jours d'affilée d'entraînement → on impose un jour plus calme
   const streak = consecutiveTrainingDays(recentSessions, today);
   if (streak >= 3) {
     score = Math.min(score, 45);
-    reasons.push(`${streak} jours d'entraînement d'affilée : place à la récupération.`);
+    why(`${streak} jours d'entraînement d'affilée`);
   }
 
-  score = Math.round(clamp(score));
-  const level = levelOf(score);
-  if (!reasons.length) {
-    reasons.push(level === "full" ? "Bonne nuit et bonne énergie : on peut pousser." : "Récupération correcte : séance standard.");
-  }
-  return { score, level, sleep: s, reasons, metrics, used: parts.map((p) => p.key) };
+  // Séance « record » seulement après une vraie bonne nuit et sans signal d'alerte
+  if ((s && s.score < 75) || reasons.some((r) => r.tone !== "good")) score = Math.min(score, NO_PEAK);
+
+  const morning = Math.round(clamp(score));
+  const strain = dayStrain({ daily, workouts, today, now, night, checkin });
+  for (const p of strain.parts) why(p.text);
+  const final = Math.round(clamp(morning - strain.drain));
+  const level = levelOf(final);
+  if (!reasons.length) why(level === "recovery" || level === "light" ? "Récupération moyenne" : "Récupération correcte", level === "recovery" || level === "light" ? "warn" : "good");
+
+  // Les 4 composantes affichées (barres 0–100) ; null = pas de donnée
+  const components = [
+    { key: "sleep", label: "Sommeil", value: s ? s.score : null, text: night ? fmtHours(night.hours) : "–" },
+    { key: "recovery", label: "Récup", value: recov.length ? Math.round(mean(recov)) : null,
+      text: hrv?.base ? `${hrv.value >= hrv.base ? "+" : ""}${Math.round((hrv.value / hrv.base - 1) * 100)} %` : rhr ? `${Math.round(rhr.value)} bpm` : "–" },
+    { key: "feel", label: "Ressenti", value: checkin?.energy || checkin?.soreness ? Math.round(feel) : null, text: checkin?.energy ? `${checkin.energy}/5` : "–" },
+    { key: "day", label: "Journée", value: Math.round(100 - (strain.drain / 30) * 100),
+      text: strain.steps != null ? `${fmtK(strain.steps)} pas` : strain.drain ? `−${strain.drain}` : "calme" },
+  ];
+
+  return { score: final, morning, drain: strain.drain, strain, level, sleep: s, reasons, metrics, components, used: parts.map((p) => p.key) };
 }
 
 function consecutiveTrainingDays(sessions, today = dateKey()) {
@@ -227,7 +308,7 @@ function consecutiveTrainingDays(sessions, today = dateKey()) {
 export const WEEKDAYS = ["Dim", "Lun", "Mar", "Mer", "Jeu", "Ven", "Sam"];
 
 export function defaultTrainDays(n) {
-  return n >= 4 ? [1, 2, 4, 5] : [1, 3, 5];
+  return n >= 5 ? [1, 2, 3, 5, 6] : n >= 4 ? [1, 2, 4, 5] : n <= 2 ? [2, 5] : [1, 3, 5];
 }
 
 /** Jours d'entraînement choisis (0 = dimanche). */
@@ -269,48 +350,78 @@ export function weekPlan(profile, sessions = [], workouts = [], now = new Date()
   const fullBody = days.length < 4;
 
   let kind = "rest";
-  let reason = "Jour de repos prévu : marche et mobilité pour bien récupérer.";
+  let reason = "Jour de repos";
   if (days.includes(now.getDay())) {
     kind = "train";
     reason = "";
     if (fullBody && gap < 2) {
       kind = "rest";
-      reason = "Full body hier : 48 h de récupération avant le suivant. La séance est décalée à demain.";
+      reason = "48 h entre deux full body : séance décalée à demain";
     }
   } else if (doneBefore < plannedBefore && gap >= (fullBody ? 2 : 1)) {
     kind = "catchup";
-    reason = "Séance manquée cette semaine : on la rattrape aujourd'hui.";
+    reason = "Séance manquée à rattraper";
   }
   return { week, kind, reason, days };
 }
 
 // ───────────────────────── Programme
 
-// Full body 3×/semaine (idéal pour recomposition) ou Haut/Bas 4×/semaine.
-// `slots` : exercices par ordre de priorité ; `extra` : ajoutés seulement si la durée le permet.
+// `slots` : schémas moteurs par ordre de priorité ("schéma:n" = n-ième variante, pour varier d'une
+// séance à l'autre) ; `extra` : ajoutés seulement si la durée le permet.
 const SPLITS = {
+  2: [
+    { name: "Full body A", focus: "Jambes · Pecs · Dos", slots: ["squat", "hpush", "hpull", "hinge:2", "vpush", "biceps", "core"], extra: ["triceps", "calves"] },
+    { name: "Full body B", focus: "Ischios · Dos · Épaules", slots: ["hinge", "vpull", "hpush:2", "lunge", "lateral", "triceps", "core:1"], extra: ["rear", "hamstring"] },
+  ],
   3: [
-    { name: "Full body A", focus: "Squat · Poussée · Tirage", slots: ["squat", "hpush", "vpull", "hinge", "arms", "core"], extra: ["calves", "rear"] },
-    { name: "Full body B", focus: "Hinge · Épaules · Dos",    slots: ["hinge", "vpush", "hpull", "lunge", "arms", "core"], extra: ["hamstring", "calves"] },
-    { name: "Full body C", focus: "Jambes · Pecs · Dos",      slots: ["lunge", "hpush", "hpull", "squat", "vpush", "core"], extra: ["rear", "arms"] },
+    { name: "Full body A", focus: "Squat · Pecs · Dos", slots: ["squat", "hpush", "vpull", "hinge:2", "lateral", "biceps", "core"], extra: ["calves", "triceps"] },
+    { name: "Full body B", focus: "Hinge · Épaules · Dos", slots: ["hinge", "vpush", "hpull", "lunge", "triceps", "rear", "core:1"], extra: ["hamstring", "biceps:1"] },
+    { name: "Full body C", focus: "Jambes · Pecs · Fessiers", slots: ["squat:2", "hpush:2", "hpull:1", "glute", "fly", "biceps:1", "core:2"], extra: ["calves", "carry"] },
   ],
   4: [
-    { name: "Haut du corps 1", focus: "Pecs · Dos · Bras",          slots: ["hpush", "vpull", "vpush", "hpull", "arms", "arms"], extra: ["rear", "core"] },
-    { name: "Bas du corps 1",  focus: "Quadriceps · Fessiers",      slots: ["squat", "hinge", "lunge", "hamstring", "calves", "core"], extra: [] },
-    { name: "Haut du corps 2", focus: "Épaules · Dos · Pecs",       slots: ["vpush", "hpull", "hpush", "vpull", "arms", "core"], extra: ["rear", "arms"] },
-    { name: "Bas du corps 2",  focus: "Ischios · Fessiers",         slots: ["hinge", "squat", "hamstring", "lunge", "calves", "core"], extra: [] },
+    { name: "Haut du corps 1", focus: "Pecs · Dos · Bras", slots: ["hpush", "vpull", "vpush", "hpull", "lateral", "biceps", "triceps"], extra: ["rear", "core"] },
+    { name: "Bas du corps 1", focus: "Quadriceps · Fessiers", slots: ["squat", "hinge", "lunge", "hamstring", "calves", "core"], extra: ["quad"] },
+    { name: "Haut du corps 2", focus: "Épaules · Dos · Pecs", slots: ["vpush:1", "hpull:1", "hpush:2", "vpull:1", "fly", "rear", "biceps:1"], extra: ["triceps:1", "lateral"] },
+    { name: "Bas du corps 2", focus: "Ischios · Fessiers", slots: ["hinge:3", "squat:3", "glute", "quad", "calves", "core:1"], extra: ["hamstring", "carry"] },
+  ],
+  5: [
+    { name: "Haut du corps", focus: "Pecs · Dos · Épaules", slots: ["hpush", "vpull", "vpush", "hpull", "lateral", "core"], extra: ["biceps", "triceps"] },
+    { name: "Bas du corps", focus: "Quadriceps · Ischios", slots: ["squat", "hinge", "lunge", "hamstring", "calves", "core:1"], extra: ["quad"] },
+    { name: "Poussée", focus: "Pecs · Épaules · Triceps", slots: ["hpush:2", "vpush:1", "hpush:4", "lateral", "fly", "triceps", "triceps:1"], extra: ["core:2"] },
+    { name: "Tirage", focus: "Dos · Biceps · Arrière d'épaule", slots: ["hpull:1", "vpull:1", "hpull:2", "rear", "biceps", "biceps:1"], extra: ["carry"] },
+    { name: "Jambes", focus: "Fessiers · Ischios · Mollets", slots: ["hinge:3", "squat:3", "glute", "quad", "hamstring:1", "calves"], extra: ["core:3"] },
   ],
 };
 
 const SCHEMES = {
-  full:   { compound: { sets: 4, reps: [6, 8],   rpe: 8, rest: 150 }, iso: { sets: 3, reps: [10, 12], rpe: 8, rest: 75 } },
-  normal: { compound: { sets: 3, reps: [8, 10],  rpe: 7, rest: 120 }, iso: { sets: 3, reps: [10, 12], rpe: 7, rest: 60 } },
-  light:  { compound: { sets: 2, reps: [10, 12], rpe: 6, rest: 90 },  iso: { sets: 2, reps: [12, 15], rpe: 6, rest: 60 } },
+  peak:   { compound: { sets: 4, reps: [5, 7],   rpe: 8.5, rest: 150 }, iso: { sets: 3, reps: [8, 12],  rpe: 9, rest: 75 } },
+  full:   { compound: { sets: 4, reps: [6, 8],   rpe: 8,   rest: 135 }, iso: { sets: 3, reps: [10, 12], rpe: 8, rest: 75 } },
+  normal: { compound: { sets: 3, reps: [8, 10],  rpe: 7,   rest: 120 }, iso: { sets: 3, reps: [10, 12], rpe: 7, rest: 60 } },
+  light:  { compound: { sets: 2, reps: [10, 12], rpe: 6,   rest: 90 },  iso: { sets: 2, reps: [12, 15], rpe: 6, rest: 60 } },
 };
-const WARMUP_MIN = 8;
+const WARMUP_MIN = 7;
+
+/** Bloc de 4 semaines : technique → volume → intensité → décharge. */
+const BLOCK = [
+  { n: 1, label: "Technique", sets: 0, rpe: -0.5 },
+  { n: 2, label: "Volume", sets: 1, rpe: 0 },
+  { n: 3, label: "Intensité", sets: 0, rpe: 0.5 },
+  { n: 4, label: "Décharge", sets: -1, rpe: -1, deload: true },
+];
+
+export function blockWeek(profile, sessions = [], now = new Date()) {
+  const today = dateKey(now);
+  const start = profile.createdAt || today;
+  const i = Math.floor(Math.max(0, daysBetween(start, today)) / 7) % 4;
+  // Décharge inutile si les 3 dernières semaines ont été légères (reprise, vacances…)
+  const recent = sessions.filter((s) => s.level !== "recovery" && daysBetween(s.date, today) <= 21).length;
+  if (i === 3 && recent < trainDaysOf(profile).length * 2) return { n: 4, label: "Consolidation", sets: 0, rpe: 0 };
+  return BLOCK[i];
+}
 
 export function splitFor(profile) {
-  return SPLITS[trainDaysOf(profile).length >= 4 ? 4 : 3];
+  return SPLITS[Math.max(2, Math.min(5, trainDaysOf(profile).length))];
 }
 
 /** Prochain jour du cycle, d'après la dernière séance de musculation réalisée. */
@@ -326,35 +437,69 @@ export function cycleOf(profile, sessions) {
   return Math.floor(lifted / (splitFor(profile).length * 4));
 }
 
+const roundRpe = (r) => Math.round(r * 2) / 2;
+
 /** Prescription d'un exercice pour un niveau donné (utilisée aussi pour remplacer un exercice). */
-export function exerciseEntry(id, { level, profile, history = [] }) {
+export function exerciseEntry(id, { level, profile, history = [], block = null, main = false }) {
   const ex = EXERCISES[id];
   const sch = SCHEMES[level === "recovery" ? "light" : level][ex.compound ? "compound" : "iso"];
   let sets = sch.sets;
+  let rpe = sch.rpe;
   if (profile.level === "beginner") sets = Math.min(sets, 3);
   if (profile.level === "advanced" && ex.compound && level !== "light") sets += 1;
+  if (block && level !== "light") {
+    if (block.deload) sets = Math.max(2, Math.round(sets * 0.6));
+    else if (ex.compound) sets += block.sets;
+    rpe = roundRpe(Math.max(5, Math.min(9, rpe + block.rpe)));
+  }
   const reps = ex.timed ? [30, 45] : sch.reps;
   const noLoad = ex.timed || ex.bw || profile.equip === "bw";
-  return {
-    id, name: ex.name, cue: ex.cue, timed: !!ex.timed, bw: !!ex.bw,
-    sets, reps, rpe: sch.rpe, rest: sch.rest,
-    suggested: noLoad ? null : suggestLoad(id, history, reps, sch.rpe),
+  const entry = {
+    id, name: ex.name, cues: ex.cues, pattern: ex.pattern, muscles: ex.m, timed: !!ex.timed, bw: !!ex.bw, uni: !!ex.uni,
+    compound: !!ex.compound, sets, reps, rpe, rest: sch.rest,
+    suggested: noLoad ? null : suggestLoad(id, history, reps, rpe),
     hint: progressionHint(id, history, reps, noLoad),
   };
+  // Jour « au top » : une série lourde (top set) puis des séries de travail à −10 %
+  if (main && level === "peak" && !noLoad && !block?.deload) {
+    entry.top = { reps: [3, 5], rpe: 9, suggested: suggestLoad(id, history, [3, 5], 9) };
+  }
+  return entry;
 }
 
 /** Durée estimée d'un exercice, en minutes (temps sous tension + repos). */
 function exMinutes(e) {
-  return (e.sets * ((e.timed ? e.reps[1] : 40) + e.rest)) / 60;
+  return (e.sets * ((e.timed ? e.reps[1] : 40) * (e.uni ? 2 : 1) + e.rest)) / 60;
+}
+
+/** Échauffement : 3 mouvements généraux + séries d'approche sur le premier exercice chargé. */
+export function warmupFor(day, first) {
+  const lower = ["squat", "hinge", "lunge"].includes(day.slots[0].split(":")[0]);
+  const moves = lower
+    ? [["bike_easy", "4 min"], ["bw_squat", "× 10"], ["walking_lunge", "× 5 / côté"]]
+    : [["bike_easy", "4 min"], ["y_raise", "× 10"], ["pushup", "× 8"]];
+  let ramp = [];
+  const w = first?.top?.suggested || first?.suggested;
+  if (w >= 30) ramp = [[0.5, 8], [0.7, 4], [0.85, 2]];
+  else if (w >= 15) ramp = [[0.5, 8], [0.75, 3]];
+  return { moves, ramp: ramp.map(([p, reps]) => ({ kg: Math.max(2.5, Math.round((w * p) / 2.5) * 2.5), reps })) };
+}
+
+/** Routine de récupération adaptée à l'état du jour. */
+export function recoveryKind({ checkin, night, score }) {
+  if ((checkin?.soreness ?? 0) >= 4) return "sore";
+  if ((checkin?.energy ?? 3) <= 2 || (night && night.hours < 5.5) || score < 25) return "low";
+  if (score >= 68) return "fresh";
+  return "active";
 }
 
 /** Construit la séance du jour en respectant la durée choisie. */
-export function buildSession({ profile, level, dayIndex, history, cycle = 0, workoutsToday = [] }) {
+export function buildSession({ profile, level, dayIndex, history, cycle = 0, workoutsToday = [], block = null, recovery = "active" }) {
   if (level === "recovery") {
+    const r = RECOVERY[recovery] || RECOVERY.active;
     return {
-      level, title: "Récupération active", focus: "Mobilité · Marche · Respiration",
-      minutes: 40, recovery: true, items: MOBILITY,
-      note: "Aujourd'hui, le meilleur entraînement c'est de récupérer. Bouger doucement favorise la récupération et les calories brûlées sans fatiguer ton système nerveux.",
+      level, title: r.title, focus: r.focus, minutes: recovery === "fresh" ? 45 : 35, recovery: true, kind: recovery,
+      items: r.items.map(([id, detail]) => ({ id, name: MOVES[id].name, detail })),
     };
   }
 
@@ -365,19 +510,26 @@ export function buildSession({ profile, level, dayIndex, history, cycle = 0, wor
   const used = [];
   const exercises = [];
   let minutes = WARMUP_MIN;
+  let letter = 0;
 
   // Séance légère : on garde l'essentiel ; sinon on ajoute les accessoires si le temps le permet
-  const slots = easy ? day.slots.filter((p, i) => i < 4 || p === "core") : [...day.slots, ...day.extra];
-  slots.forEach((pattern, i) => {
+  const slots = easy ? day.slots.filter((p, i) => i < 4 || p.startsWith("core")) : [...day.slots, ...day.extra];
+  slots.forEach((slot, i) => {
+    const [pattern, off] = slot.split(":");
     // Les 3 premiers mouvements restent fixes pour mesurer le progrès ; les accessoires tournent
-    const id = pickExercise(pattern, profile.equip, { easy, variant: i < 3 ? 0 : cycle, exclude: used });
+    const id = pickExercise(pattern, profile.equip, { easy, variant: Number(off || 0) + (i < 3 ? 0 : cycle), exclude: used });
     if (!id) return;
-    const e = exerciseEntry(id, { level, profile, history });
-    const m = exMinutes(e);
-    if (exercises.length >= 3 && minutes + m > budget) return;
+    const e = exerciseEntry(id, { level, profile, history, block, main: exercises.length === 0 });
+    let cost = exMinutes(e);
+    // Accessoires enchaînés en superset (deux exercices, un seul repos) pour tenir dans le temps
+    const prev = exercises[exercises.length - 1];
+    const pair = !easy && i >= 3 && !e.compound && prev && !prev.compound && !prev.ss && prev.sets === e.sets;
+    if (pair) cost -= (prev.sets * (prev.rest - 15)) / 60;
+    if (exercises.length >= 3 && minutes + cost > budget) return;
+    if (pair) { prev.rest = 15; prev.ss = e.ss = "ABCD"[letter++]; }
     used.push(id);
     exercises.push(e);
-    minutes += m;
+    minutes += cost;
   });
 
   // Finisher cardio (utile pour la perte de gras), seulement s'il reste du temps
@@ -385,26 +537,52 @@ export function buildSession({ profile, level, dayIndex, history, cycle = 0, wor
   const room = budget - minutes;
   let finisher = null;
   if (cardioToday < 20) {
-    if (level === "full" && room >= 8) finisher = { name: "Finisher intervalles", detail: "8 rounds : 20 s effort / 40 s récup (vélo, rameur ou burpees)", minutes: 8 };
-    else if (level === "normal" && room >= 10) { const m = Math.min(15, Math.floor(room / 5) * 5); finisher = { name: "Cardio zone 2", detail: `${m} min à allure où tu peux parler`, minutes: m }; }
-    else if (level === "light" && room >= 10) { const m = Math.min(20, Math.floor(room / 5) * 5); finisher = { name: "Marche tranquille", detail: `${m} min, idéalement dehors`, minutes: m }; }
+    if ((level === "full" || level === "peak") && room >= 8) finisher = { id: "mountain_climber", name: "Intervalles", detail: "8 × 20 s vite / 40 s lent", minutes: 8 };
+    else if (level === "normal" && room >= 10) { const m = Math.min(15, Math.floor(room / 5) * 5); finisher = { id: "bike_easy", name: "Cardio zone 2", detail: `${m} min, tu peux parler`, minutes: m }; }
+    else if (level === "light" && room >= 10) { const m = Math.min(20, Math.floor(room / 5) * 5); finisher = { id: "walk", name: "Marche", detail: `${m} min tranquille`, minutes: m }; }
   }
   if (finisher) minutes += finisher.minutes;
 
   return {
-    level, dayIndex: dayIndex % split.length, title: day.name, focus: day.focus, exercises, finisher,
+    level, dayIndex: dayIndex % split.length, title: day.name, focus: day.focus, exercises, finisher, block,
+    warmup: warmupFor(day, exercises[0]),
     minutes: Math.round(minutes), cardioDone: cardioToday >= 20 ? Math.round(cardioToday) : 0,
-    note: easy
-      ? "Version allégée : charges réduites, moins de séries, aucune série à l'échec. Le but est de maintenir le stimulus sans creuser la fatigue."
-      : level === "full"
-        ? "Tu as bien récupéré : charges lourdes, garde 2 répétitions en réserve sur la dernière série."
-        : "Séance standard : technique propre, 3 répétitions en réserve.",
   };
+}
+
+/** Muscles sollicités par une liste d'exercices : principaux et secondaires. */
+export function musclesOf(exercises) {
+  const p = new Set(), s = new Set();
+  for (const e of exercises) {
+    const m = e.muscles || EXERCISES[e.id]?.m;
+    if (!m) continue;
+    m.p.forEach((x) => p.add(x));
+    m.s.forEach((x) => s.add(x));
+  }
+  return { p: [...p], s: [...s].filter((x) => !p.has(x)) };
+}
+
+/** Séries par muscle sur les `days` derniers jours (principal = 1, secondaire = 0,5), normalisées 0–1. */
+export function muscleVolume(sessions, days = 7, today = dateKey()) {
+  const vol = {};
+  for (const s of sessions) {
+    if (daysBetween(s.date, today) >= days) continue;
+    for (const e of s.exercises || []) {
+      const m = EXERCISES[e.id]?.m;
+      const n = e.sets.filter((x) => x.done).length;
+      if (!m || !n) continue;
+      m.p.forEach((k) => { vol[k] = (vol[k] || 0) + n; });
+      m.s.forEach((k) => { vol[k] = (vol[k] || 0) + n / 2; });
+    }
+  }
+  const heat = {};
+  for (const [k, v] of Object.entries(vol)) heat[k] = Math.min(1, v / 12); // ~12 séries / semaine = bon volume
+  return { sets: vol, heat };
 }
 
 // ───────────────────────── Charges
 
-const RPE_OF_LEVEL = { full: 8, normal: 7, light: 6 };
+const RPE_OF_LEVEL = { peak: 8.5, full: 8, normal: 7, light: 6 };
 
 /** 1RM estimé (Epley), en tenant compte des répétitions gardées en réserve (10 − RPE). */
 export function e1rm(weight, reps, rpe = 8) {
@@ -445,9 +623,7 @@ export function progressionHint(id, history, reps, noLoad) {
   if (!last) return null;
   const done = last.sets.filter((s) => s.done && s.reps > 0);
   if (!done.length || !done.every((s) => s.reps >= reps[1])) return null;
-  return EXERCISES[id]?.timed
-    ? "Objectif atteint la dernière fois : tiens 5 à 10 s de plus."
-    : "Haut de fourchette atteint la dernière fois : ralentis la descente (4 s), ajoute un lest ou passe à une variante plus dure.";
+  return EXERCISES[id]?.timed ? "Objectif atteint : +5 à 10 s" : "Haut de fourchette atteint : descente en 4 s ou variante plus dure";
 }
 
 export function lastPerformance(id, history) {
@@ -526,4 +702,9 @@ export function fmtHours(h) {
   const hh = Math.floor(h);
   const mm = Math.round((h - hh) * 60);
   return mm === 60 ? `${hh + 1}h00` : `${hh}h${String(mm).padStart(2, "0")}`;
+}
+
+/** 8 240 → « 8,2k » */
+export function fmtK(n) {
+  return n >= 1000 ? `${(n / 1000).toFixed(1).replace(".", ",").replace(",0", "")}k` : String(Math.round(n));
 }

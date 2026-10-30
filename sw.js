@@ -1,7 +1,7 @@
 // Cache hors ligne : réseau d'abord pour l'app, cache en secours ; polices Google en cache d'abord.
-const CACHE = "forme-v4";
+const CACHE = "forme-v5";
 const ASSETS = ["./", "index.html", "styles.css", "manifest.webmanifest", "icon.svg", "icons/icon-192.png",
-  "js/app.js", "js/config.js", "js/engine.js", "js/exercises.js", "js/store.js", "js/google-health.js"];
+  "js/app.js", "js/config.js", "js/engine.js", "js/exercises.js", "js/figures.js", "js/store.js", "js/google-health.js"];
 const FONTS = ["https://fonts.googleapis.com", "https://fonts.gstatic.com"];
 
 self.addEventListener("install", (e) => {

@@ -34,25 +34,35 @@ température / SpO₂ nocturnes, pas, dépense énergétique, séances de sport,
 l'app continue avec les autres et ses valeurs par défaut. Profil → Google Health indique ce qui a été reçu.
 Sans Google, tu peux saisir ta nuit en 5 secondes chaque matin.
 
+Le compte Google est mémorisé à la première connexion : ensuite, quand le jeton (valable 1 h) expire, un appui sur
+Synchroniser le renouvelle sur ce compte sans redemander de le choisir.
+
 ## Comment la séance s'adapte
 
-| Score de forme | Séance |
+**Énergie du jour = récupération du matin − fatigue de la journée.**
+
+- Récupération : sommeil 35 · VFC 25 · ressenti 20 · FC repos 10 · charge d'entraînement 10. Une donnée absente sort du
+  calcul et les autres sont repondérées (sans montre : sommeil + ressenti). Garde-fous : signes de maladie, dette de
+  sommeil, surcharge de la semaine, sport d'endurance la veille, 3 jours d'entraînement d'affilée.
+- Fatigue de la journée (jusqu'à −30) : pas au-delà de ton rythme habituel à cette heure, sport enregistré par Google,
+  journée « active » ou « physique » déclarée, plus de 12 h debout (amplifié après une nuit courte).
+
+| Énergie | Séance |
 |---|---|
-| 75+ | **Intense** : 4 × 6–8, RPE 8, finisher en intervalles si le temps le permet |
-| 52–74 | **Standard** : 3 × 8–10, RPE 7, cardio zone 2 en fin de séance |
-| 32–51 | **Léger** : charges réduites, 2 séries, variantes guidées, pas d'échec |
-| < 32 | **Récupération** : mobilité + marche, pas de muscu |
+| 85+ | **Au top** : top set lourd sur le 1er exercice puis séries à −10 %, intervalles |
+| 68–84 | **Pleine forme** : 4 × 6–8, RPE 8, intervalles si le temps le permet |
+| 50–67 | **En forme** : 3 × 8–10, RPE 7, cardio zone 2 |
+| 32–49 | **Fatigué** : 2 séries, variantes guidées, pas d'échec, marche |
+| < 32 | **À recharger** : récupération choisie selon l'état (décompression si courbatures, recharge si vidé, repos actif si en forme un jour de repos) |
 
-Score = sommeil 35 · VFC 25 · ressenti 20 · FC repos 10 · charge d'entraînement 10. Une donnée absente sort du calcul et
-les autres sont repondérées (sans montre : sommeil + ressenti). Garde-fous : signes de maladie, dette de sommeil,
-surcharge de la semaine, sport d'endurance la veille, 3 jours d'entraînement d'affilée.
-
-La séance tient dans la durée choisie, les jours d'entraînement sont choisis dans le profil (48 h entre deux full body,
-séance manquée rattrapée), et les charges viennent du 1RM estimé sur les dernières séances.
+Programme : full body (2–3 jours), haut / bas (4 jours) ou haut / bas + poussée / tirage / jambes (5 jours), en cycles de
+4 semaines (technique → volume → intensité → décharge). Échauffement et séries d'approche calculés, accessoires en
+superset quand le temps manque, séance tenue dans la durée choisie, charges tirées du 1RM estimé.
 
 ## Fichiers
 
-- `js/engine.js` : score de forme, génération des séances, progression, nutrition
-- `js/exercises.js` : bibliothèque d'exercices (salle / haltères / poids du corps)
+- `js/engine.js` : énergie du jour, génération des séances, progression, nutrition
+- `js/exercises.js` : bibliothèque d'exercices (muscles, consignes) et routines de récupération
+- `js/figures.js` : schémas SVG animés des exercices et carte des muscles
 - `js/google-health.js` : OAuth + lecture des données Google Health (chacune facultative)
 - `js/app.js` : interface · `js/store.js` : données (stockées localement sur l'appareil)
