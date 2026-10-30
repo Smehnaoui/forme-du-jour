@@ -86,17 +86,44 @@ function render() {
     a.classList.toggle("active", a.dataset.tab === tab);
     if (a.dataset.tab === tab) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
   });
-  $app.innerHTML = view(s);
+  const live = liveBar(s, r);
+  $app.classList.toggle("has-live", !!live);
+  $app.innerHTML = view(s) + live;
+  frenchSpaces($app);
   afterRender(r);
 }
 
+const clock = (sec) => (sec >= 3600 ? `${Math.floor(sec / 3600)}h${String(Math.floor(sec / 60) % 60).padStart(2, "0")}` : `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`);
+
+/** Hors de l'écran de séance : rappel de la séance en cours, avec son chrono ou le repos qui tourne. */
+function liveBar(s, r) {
+  const a = s.active;
+  if (!a || isStale(a) || r === "workout") return "";
+  return `
+    <button class="live-bar" data-action="resume" data-lvl="${a.level}">
+      <span class="live-dot" aria-hidden="true"></span>
+      <span class="grow"><b>Séance en cours</b><small>${esc(a.title)} · <span id="live-t">${liveText(a)}</span></small></span>
+      <span class="live-go">Reprendre ${ICON.chev}</span>
+    </button>`;
+}
+function liveText(a) {
+  if (restTimer) return `repos ${clock(Math.max(0, Math.round((restEnd - Date.now()) / 1000)))}`;
+  return clock(Math.floor((Date.now() - a.startedAt) / 1000));
+}
+
 function go(path) {
-  if (location.hash === `#/${path}`) render();
-  else location.hash = `#/${path}`;
+  const target = `#/${path}`;
+  // Un panneau ouvert occupe une entrée d'historique : on la remplace, pour que « retour » ramène à l'écran d'avant
+  const fromSheet = dropSheetEntry();
+  if (location.hash === target) { if (fromSheet) history.back(); render(); }
+  else if (fromSheet) location.replace(target);
+  else location.hash = target;
   window.scrollTo({ top: 0 });
 }
 
-window.addEventListener("hashchange", () => { render(); window.scrollTo({ top: 0 }); });
+window.addEventListener("hashchange", () => { dropSheetEntry(); render(); window.scrollTo({ top: 0 }); });
+// Geste ou bouton retour avec un panneau ouvert : on ferme le panneau au lieu de quitter l'écran
+window.addEventListener("popstate", () => dropSheetEntry());
 
 // ═════════════════════════ Calculs du jour
 
@@ -158,20 +185,21 @@ let ringScore = null;
 let checkinOpen = false;
 let syncing = false;
 
-function gauge(r) {
+/** `estimated` : pas de nuit renseignée, le score repose sur une nuit moyenne supposée. */
+function gauge(r, estimated) {
   const R = 80, C = 2 * Math.PI * R, L = C * 0.75;
   const arc = (frac, cls, extra = "") =>
     `<circle cx="100" cy="100" r="${R}" fill="none" stroke-width="14" stroke-linecap="round" class="${cls}" transform="rotate(135 100 100)" stroke-dasharray="${(L * frac).toFixed(1)} ${C.toFixed(1)}" ${extra}/>`;
   const from = ringFrom == null ? 0 : ringFrom / 100;
   ringScore = r.score;
   return `
-    <div class="gauge" role="img" aria-label="Énergie du jour : ${r.score} sur 100">
+    <div class="gauge ${estimated ? "estimated" : ""}" role="img" aria-label="Énergie du jour${estimated ? " estimée, sans ta nuit : environ" : " :"} ${r.score} sur 100">
       <svg viewBox="0 0 200 170" aria-hidden="true">
         ${arc(1, "track")}
         ${r.drain > 0 ? arc(r.morning / 100, "spent") : ""}
         ${arc(Math.max(0.005, from), "val", `data-to="${(L * Math.max(0.005, r.score / 100)).toFixed(1)} ${C.toFixed(1)}"`)}
       </svg>
-      <div class="center" aria-hidden="true"><div><div class="score">${r.score}</div><div class="lbl">ÉNERGIE</div></div></div>
+      <div class="center" aria-hidden="true"><div><div class="score">${estimated ? `<span class="approx">≈</span>` : ""}${r.score}</div><div class="lbl">${estimated ? "ÉNERGIE ESTIMÉE" : "ÉNERGIE"}</div></div></div>
     </div>`;
 }
 
@@ -201,7 +229,7 @@ function viewToday(s) {
 
   const sleepCta = night ? "" : `
     <div class="hero-cta">
-      ${s.google.clientId ? `<button class="btn white" data-action="sync">${ICON.sync} Ma nuit Google</button>` : ""}
+      ${s.google.clientId ? `<button class="btn white" data-action="sync">${ICON.sync} Nuit Google</button>` : ""}
       <button class="btn" data-action="edit-sleep" ${s.google.clientId ? "" : `style="grid-column:1/-1"`}>${ICON.moon} Saisir ma nuit</button>
     </div>`;
 
@@ -218,28 +246,29 @@ function viewToday(s) {
 
   return `
     <header class="top">
-      <div><div class="date">${esc(dateStr)}</div><h1>${hello}${s.profile.name ? " " + esc(s.profile.name) : ""}</h1></div>
+      <div><div class="date">${esc(dateStr)}</div><h1>${hello}${s.profile.name ? " " + esc(s.profile.name) : " !"}</h1></div>
       ${s.google.clientId ? `<button class="icon-btn ${syncing ? "spin" : ""}" data-action="sync" aria-label="Synchroniser Google Health">${ICON.sync}${stale ? `<span class="dot"></span>` : ""}</button>` : ""}
     </header>
 
     ${staleBlock}
 
     <section class="hero" data-lvl="${r.level}">
-      ${gauge(r)}
+      ${gauge(r, !night)}
       <div class="hero-level"><span class="lvl-ico">${lvlIcon(r.level)}</span>${shown.label}</div>
       ${signals}
       ${components(r)}
       ${sleepCta}
     </section>
 
-    ${weekStrip(wp)}
-
     ${checkinCard(checkin)}
 
-    <div class="sec"><h3>${doneToday ? "Bravo" : p.restDay ? "Repos" : "Séance du jour"}</h3>${block && !session.recovery ? `<span class="tag">S${block.n} · ${block.label}</span>` : ""}</div>
+    <div class="sec"><h2>${doneToday ? "Bravo" : p.restDay ? "Repos" : "Séance du jour"}</h2>${block && !session.recovery ? `<span class="tag">S${block.n} · ${block.label}</span>` : ""}</div>
     ${doneToday ? doneCard(doneToday, nut) : sessionCard(s, p)}
 
-    <div class="sec"><h3>Nutrition</h3><button class="link" data-action="nutri-info">Recomposition ${ICON.chev}</button></div>
+    <div class="sec"><h2>Ta semaine</h2></div>
+    ${weekStrip(wp)}
+
+    <div class="sec"><h2>Nutrition</h2><button class="link" data-action="nutri-info">Recomposition ${ICON.chev}</button></div>
     <section class="nutri">
       ${nutTile(ICON.food, nut.target.toLocaleString("fr-FR"), "kcal cible", null)}
       ${nutTile(ICON.egg, `${nut.protein} g`, "protéines", null)}
@@ -248,12 +277,14 @@ function viewToday(s) {
   `;
 }
 
+/** Anneau seulement quand il y a une progression à montrer ; sinon un simple repère, pas une jauge à 0 %. */
 function nutTile(icon, v, k, frac) {
   const C = 2 * Math.PI * 24;
-  return `<div class="nut"><div class="ring"><svg viewBox="0 0 58 58" aria-hidden="true">
+  const ring = frac != null ? `<svg viewBox="0 0 58 58" aria-hidden="true">
       <circle cx="29" cy="29" r="24" fill="none" stroke-width="5" class="t"/>
-      ${frac != null ? `<circle cx="29" cy="29" r="24" fill="none" stroke-width="5" class="p" stroke-dasharray="${(C * Math.min(1, frac)).toFixed(1)} ${C.toFixed(1)}"/>` : ""}
-    </svg><span class="ic">${icon}</span></div><div class="v">${v}</div><div class="k">${k}</div></div>`;
+      <circle cx="29" cy="29" r="24" fill="none" stroke-width="5" class="p" stroke-dasharray="${(C * Math.min(1, frac)).toFixed(1)} ${C.toFixed(1)}"/>
+    </svg>` : "";
+  return `<div class="nut"><div class="ring ${frac != null ? "" : "none"}">${ring}<span class="ic">${icon}</span></div><div class="v">${v}</div><div class="k">${k}</div></div>`;
 }
 
 const DAY_OPTS = [[1, "Calme", ICON.sofa], [2, "Active", ICON.walk], [3, "Physique", ICON.hammer]];
@@ -263,7 +294,7 @@ function checkinCard(c) {
   const complete = c.energy && c.soreness && c.day;
   if (complete && !checkinOpen) {
     const day = DAY_OPTS.find(([v]) => v === c.day);
-    return `<div class="sec"><h3>Ressenti</h3><button class="link" data-action="checkin-edit">Modifier</button></div>
+    return `<div class="sec"><h2>Ressenti</h2><button class="link" data-action="checkin-edit">Modifier</button></div>
       <section class="card ck-summary">
         <span class="tag">${batteryIcon(c.energy)} Énergie ${c.energy}/5</span>
         <span class="tag">${barsIcon(c.soreness)} Courbatures ${c.soreness}/5</span>
@@ -273,7 +304,7 @@ function checkinCard(c) {
   const scale = (key, icon, val) => [1, 2, 3, 4, 5].map((v) =>
     `<button class="chip" data-action="checkin" data-key="${key}" data-val="${v}" aria-pressed="${val === v}" aria-label="${key === "energy" ? "Énergie" : "Courbatures"} ${v} sur 5">${icon(v)}${v}</button>`).join("");
   return `
-    <div class="sec"><h3>Ressenti</h3><span class="small muted">3 touches</span></div>
+    <div class="sec"><h2>Ressenti</h2><span class="small muted">3 touches</span></div>
     <section class="card checkin">
       <div class="ck-row"><div class="ck-lbl"><span>Énergie</span><span>vidé → au top</span></div><div class="ck-scale">${scale("energy", batteryIcon, c.energy)}</div></div>
       <div class="ck-row"><div class="ck-lbl"><span>Courbatures</span><span>aucune → fortes</span></div><div class="ck-scale">${scale("soreness", barsIcon, c.soreness)}</div></div>
@@ -285,7 +316,7 @@ function checkinCard(c) {
 
 function tile(id, { name, rx, sub = "", ss = "", ei = "" } = {}) {
   return `<button class="tile" data-action="ex-info" data-id="${id}" ${ei !== "" ? `data-ei="${ei}"` : ""}>
-    ${ss ? `<span class="ss">${ss}</span>` : ""}${figure(id)}
+    ${ss ? `<span class="ss">${ss}</span>` : ""}${figure(id, { ghost: true })}
     <span class="nm">${esc(name)}</span><span class="rx">${rx}${sub ? ` <small>${sub}</small>` : ""}</span></button>`;
 }
 
@@ -358,11 +389,15 @@ function viewWorkout(s) {
   const total = a.recovery ? a.items.length : a.exercises.reduce((t, e) => t + e.sets.length, 0);
   const done = a.recovery ? a.items.filter((i) => i.done).length : a.exercises.reduce((t, e) => t + e.sets.filter((x) => x.done).length, 0);
 
+  // Exercice en cours (le seul animé) : celui de la dernière série validée s'il en reste, sinon le suivant non terminé
+  const open = (e) => e.sets.some((x) => !x.done);
+  const from = a.recovery ? 0 : a.exercises.findIndex((e, i) => i >= (a.focus ?? 0) && open(e));
+  const cur = a.recovery ? a.items.findIndex((i) => !i.done) : from >= 0 ? from : a.exercises.findIndex(open);
   let body;
   if (a.recovery) {
     body = `<section class="card">${a.items.map((it, i) => `
       <div class="recovery-row ${it.done ? "is-done" : ""}">
-        <button class="figbox" data-action="ex-info" data-id="${it.id}" aria-label="Voir ${esc(it.name)}">${figure(it.id, { animate: true })}</button>
+        <button class="figbox" data-action="ex-info" data-id="${it.id}" aria-label="Voir ${esc(it.name)}">${figure(it.id, { animate: i === cur })}</button>
         <div class="grow"><div style="font-weight:800">${esc(it.name)}</div><div class="small muted">${esc(it.detail)}</div></div>
         <button class="check" data-action="toggle-item" data-i="${i}" aria-label="Valider ${esc(it.name)}" aria-pressed="${!!it.done}">${ICON.check}</button>
       </div>`).join("")}</section>`;
@@ -371,11 +406,11 @@ function viewWorkout(s) {
     body = warmupCard(a) + a.exercises.map((e, ei) => {
       const label = e.ss && e.ss !== lastSs ? `<div class="ss-label">Superset ${e.ss} · enchaîne sans pause</div>` : !e.ss && lastSs ? `<div class="ss-label">Suite</div>` : "";
       lastSs = e.ss || null;
-      return label + exerciseCard(s, e, ei, a);
+      return label + exerciseCard(s, e, ei, a, ei === cur);
     }).join("") + (a.finisher ? `
       <section class="card finisher">
         <div class="row">
-          <div class="figbox" style="width:64px;height:64px;background:var(--surface-2);border-radius:14px;flex-shrink:0">${figure(a.finisher.id, { animate: true })}</div>
+          <div class="figbox" style="width:64px;height:64px;background:var(--surface-2);border-radius:14px;flex-shrink:0">${figure(a.finisher.id, { animate: cur < 0 && !a.finisherDone })}</div>
           <div class="grow"><div class="kicker">Bonus brûle-graisse</div><h3 style="margin-top:2px">${esc(a.finisher.name)}</h3><div class="small muted">${esc(a.finisher.detail)}</div></div>
           <button class="check ${a.finisherDone ? "on" : ""}" style="width:52px" data-action="toggle-finisher" aria-label="Valider le bonus" aria-pressed="${!!a.finisherDone}">${ICON.check}</button>
         </div>
@@ -400,9 +435,28 @@ function viewWorkout(s) {
       <button class="btn primary grow" data-action="finish">Terminer</button>
     </div></div>
     <div class="rest-bar" id="rest-bar" aria-live="polite" data-lvl="${a.level}">
-      <div class="t" id="rest-t">0:00</div><div class="lbl">Repos</div>
-      <button data-action="rest-add">+30 s</button><button data-action="rest-skip">Passer</button>
+      ${!a.recovery && cur >= 0 ? restNext(a.exercises[cur]) : ""}
+      <div class="rest-row">
+        <div class="t" id="rest-t">0:00</div><div class="lbl">Repos</div>
+        <button data-action="rest-add">+30 s</button><button data-action="rest-skip">Passer</button>
+      </div>
       <i class="fill" id="rest-fill"></i>
+    </div>`;
+}
+
+/** Pendant le repos : la prochaine série et le geste à refaire. */
+function restNext(e) {
+  const si = e.sets.findIndex((x) => !x.done);
+  const x = e.sets[si], tgt = x.target || e.repsTarget;
+  const load = x.weight ? ` · ${kg(x.weight)} kg` : e.bw ? " · poids du corps" : "";
+  return `
+    <div class="rest-next">
+      <div class="rest-fig">${figure(e.id, { animate: true })}</div>
+      <div class="grow">
+        <div class="lbl">Ensuite · série ${si + 1}/${e.sets.length}</div>
+        <div class="nx">${esc(e.name)}</div>
+        <div class="nx-t">${tgt[0]}–${tgt[1]}${e.timed ? " s" : " reps"}${load}</div>
+      </div>
     </div>`;
 }
 
@@ -419,14 +473,14 @@ function warmupCard(a) {
     </details>`;
 }
 
-function exerciseCard(s, e, ei, a) {
+function exerciseCard(s, e, ei, a, current) {
   const exDone = e.sets.every((x) => x.done);
   const last = lastPerformance(e.id, s.sessions);
   const lastTxt = last ? last.sets.filter((x) => x.done).map((x) => `${x.weight ? kg(x.weight) : "PDC"}×${x.reps}`).join(" · ") : null;
   return `
     <section class="card ex-card ${exDone ? "done" : ""}" id="ex-${ei}">
       <div class="ex-head">
-        <button class="figbox" data-action="ex-info" data-id="${e.id}" data-ei="${ei}" aria-label="Voir l'exécution de ${esc(e.name)}">${figure(e.id, { animate: !exDone })}<span class="i">${ICON.info}</span></button>
+        <button class="figbox" data-action="ex-info" data-id="${e.id}" data-ei="${ei}" aria-label="Voir l'exécution de ${esc(e.name)}">${figure(e.id, { animate: current })}<span class="i">${ICON.info}</span></button>
         <div class="grow">
           <div class="kicker">${ei + 1}/${a.exercises.length}${e.uni ? " · par côté" : ""}</div>
           <h3>${esc(e.name)}</h3>
@@ -436,19 +490,19 @@ function exerciseCard(s, e, ei, a) {
       </div>
       ${e.hint ? `<div class="hint-line">${esc(e.hint)}</div>` : ""}
       <div class="sets">
-        <div class="set-head"><span>#</span><span>${e.timed ? "—" : "Kg"}</span><span>${e.timed ? "Sec." : "Reps"}</span><span>RPE</span><span></span></div>
+        <div class="set-head"><span>#</span><span>${e.timed ? "—" : "Kg"}</span><span>${e.timed ? "Sec." : "Reps"}</span><button class="rpe-q" data-action="rpe-info" data-rpe="${e.rpe}" aria-label="RPE : l'effort ressenti, à quoi ça correspond ?">RPE<i aria-hidden="true">?</i></button><span></span></div>
         ${e.sets.map((x, si) => {
           const tgt = x.target || e.repsTarget;
           return `
           <div class="set-row ${x.done ? "is-done" : ""}">
             <span class="idx ${x.top ? "top" : ""}">${x.top ? "TOP" : si + 1}</span>
             <input type="number" inputmode="decimal" step="0.25" min="0" value="${x.weight ?? ""}" placeholder="${e.timed ? "—" : e.bw ? "PDC" : "kg"}" ${e.timed ? "disabled" : ""}
-              data-field="weight" data-ei="${ei}" data-si="${si}" aria-label="Charge série ${si + 1}" />
+              data-field="weight" data-ei="${ei}" data-si="${si}" aria-label="Charge, série ${si + 1}, ${esc(e.name)}" />
             <input type="number" inputmode="numeric" min="0" value="${x.reps ?? ""}" placeholder="${tgt[0]}–${tgt[1]}"
-              data-field="reps" data-ei="${ei}" data-si="${si}" aria-label="${e.timed ? "Secondes" : "Répétitions"} série ${si + 1}" />
+              data-field="reps" data-ei="${ei}" data-si="${si}" aria-label="${e.timed ? "Secondes" : "Répétitions"}, série ${si + 1}, ${esc(e.name)}" />
             <input type="number" inputmode="decimal" step="0.5" min="5" max="10" value="${x.rpe ?? ""}" placeholder="${String(x.top ? 9 : e.rpe).replace(".", ",")}"
-              data-field="rpe" data-ei="${ei}" data-si="${si}" aria-label="Effort ressenti (RPE) série ${si + 1}" />
-            <button class="check" data-action="toggle-set" data-ei="${ei}" data-si="${si}" aria-label="Valider la série ${si + 1}" aria-pressed="${!!x.done}">${ICON.check}</button>
+              data-field="rpe" data-ei="${ei}" data-si="${si}" aria-label="Effort ressenti (RPE), série ${si + 1}, ${esc(e.name)}" />
+            <button class="check" data-action="toggle-set" data-ei="${ei}" data-si="${si}" aria-label="Valider la série ${si + 1}, ${esc(e.name)}" aria-pressed="${!!x.done}">${ICON.check}</button>
           </div>`;
         }).join("")}
       </div>
@@ -477,12 +531,12 @@ function viewProgram(s) {
       <span class="tag">${days.length} séances / sem.</span><span class="tag">${splitName}</span><span class="tag">${equipName}</span><span class="tag">${s.profile.duration} min</span>
     </div>
 
-    <div class="sec" style="margin-top:4px"><h3>Cycle de 4 semaines</h3></div>
+    <div class="sec" style="margin-top:4px"><h2>Cycle de 4 semaines</h2></div>
     <section class="cycle">
       ${["Technique", "Volume", "Intensité", "Décharge"].map((l, i) => `<div class="wk ${block.n === i + 1 ? "cur" : ""}"><b>S${i + 1}</b><span>${block.n === i + 1 ? esc(block.label) : l}</span></div>`).join("")}
     </section>
 
-    <div class="sec"><h3>Tes séances</h3><span class="small muted">version standard</span></div>
+    <div class="sec"><h2>Tes séances</h2><span class="small muted">version standard</span></div>
     ${split.map((day, i) => {
       const sess = buildSession({ profile: s.profile, level: "normal", dayIndex: i, history: s.sessions, cycle, block });
       return `
@@ -495,10 +549,10 @@ function viewProgram(s) {
       </section>`;
     }).join("")}
 
-    <div class="sec"><h3>Selon ton énergie</h3></div>
+    <div class="sec"><h2>Selon ton énergie</h2></div>
     ${levelScale()}
 
-    <div class="sec"><h3>Bibliothèque</h3></div>
+    <div class="sec"><h2>Bibliothèque</h2></div>
     <a class="cta-row" href="#/library">
       <div class="figs">${libIds.map((id) => figure(id)).join("")}</div>
       <div class="grow"><div style="font-weight:800">${Object.keys(EXERCISES).length} exercices illustrés</div><div class="small muted">Muscles, exécution, alternatives</div></div>
@@ -573,14 +627,14 @@ function viewProgress(s) {
       <div class="stat"><div class="v">${delta == null ? "–" : (delta > 0 ? "+" : "") + delta.toFixed(1).replace(".", ",")}</div><div class="k">kg depuis le début</div></div>
     </section>
 
-    <div class="sec"><h3>Muscles · 7 jours</h3><span class="small muted">séries</span></div>
+    <div class="sec"><h2>Muscles · 7 jours</h2><span class="small muted">séries</span></div>
     <section class="card" data-lvl="full">
       ${ranked.length ? `<div class="heat">${muscleMap({ heat: vol.heat })}<div class="heat-list">${ranked.map(([k, v]) => `<div class="hl"><span>${MUSCLES[k]}</span><span>${Math.round(v)}</span></div>`).join("")}</div></div>
         <div class="legend"><span><i style="background:color-mix(in srgb,var(--lvl) 22%,#30353d)"></i>Peu</span><span><i style="background:color-mix(in srgb,var(--lvl) 45%,#30353d)"></i>Moyen</span><span><i style="background:var(--lvl)"></i>~12 séries+</span></div>`
         : `<p class="muted small" style="margin:0">Tes muscles travaillés apparaîtront ici après ta première séance.</p>`}
     </section>
 
-    <div class="sec"><h3>Poids</h3><button class="link" data-action="add-weight">${ICON.plus} Pesée</button></div>
+    <div class="sec"><h2>Poids</h2><button class="link" data-action="add-weight">${ICON.plus} Pesée</button></div>
     <section class="card">
       ${w.length >= 2 ? weightChart(w) : `<p class="muted small" style="margin:0">Pèse-toi le matin à jeun, 2–3 fois par semaine.${w.length ? ` Dernière pesée : <strong>${kg(w[0].kg)} kg</strong>.` : ""}</p>`}
       ${fat ? `<div class="grid-2" style="margin-top:14px">
@@ -589,17 +643,17 @@ function viewProgress(s) {
       </div>` : ""}
     </section>
 
-    <div class="sec"><h3>Sommeil · 14 nuits</h3><span class="small muted">objectif ${fmtHours(s.profile.sleepTarget)}</span></div>
+    <div class="sec"><h2>Sommeil · 14 nuits</h2><span class="small muted">objectif ${fmtHours(s.profile.sleepTarget)}</span></div>
     <section class="card">${sleepChart(s)}</section>
 
     ${sports.length ? `
-      <div class="sec"><h3>Autres sports</h3><span class="small muted">14 jours</span></div>
+      <div class="sec"><h2>Autres sports</h2><span class="small muted">14 jours</span></div>
       <section class="card">${sports.map((x) => `
         <div class="history-item"><div class="badge" data-lvl="normal"><b>${new Date(x.date + "T12:00").getDate()}</b></div>
           <div class="grow"><div style="font-weight:800;text-transform:capitalize">${esc(x.name)}</div><div class="small muted">${x.minutes} min</div></div></div>`).join("")}
       </section>` : ""}
 
-    <div class="sec"><h3>Historique</h3></div>
+    <div class="sec"><h2>Historique</h2></div>
     <section class="card">
       ${s.sessions.length ? s.sessions.slice(0, 30).map((x, i) => {
         const d = new Date(x.date + "T12:00");
@@ -697,7 +751,7 @@ function viewProfile(s) {
       <div class="field"><span class="label">Objectif de sommeil</span>${seg("sleepTarget", [[7, "7h"], [7.5, "7h30"], [8, "8h"], [8.5, "8h30"]], p.sleepTarget)}</div>
     </section>
 
-    <div class="sec"><h3>Google Health</h3><span class="tag ${g.connected ? "ok" : ""}">${g.connected ? "Connecté" : "Non connecté"}</span></div>
+    <div class="sec"><h2>Google Health</h2><span class="tag ${g.connected ? "ok" : ""}">${g.connected ? "Connecté" : "Non connecté"}</span></div>
     <section class="card stack">
       ${g.connected && email ? `<div class="account"><div class="av">${esc(email[0].toUpperCase())}</div><div class="grow"><div style="font-weight:800">${esc(email)}</div><div class="small muted">Compte retenu : plus besoin de le choisir</div></div></div>` : ""}
       ${!g.connected ? `<p class="small muted" style="margin:0">Sommeil, VFC, FC repos, pas, sport, poids. Lecture seule, données gardées sur ton téléphone.</p>` : ""}
@@ -721,7 +775,7 @@ function viewProfile(s) {
       </details>
     </section>
 
-    <div class="sec"><h3>Données</h3></div>
+    <div class="sec"><h2>Données</h2></div>
     <section class="card grid-2">
       <button class="btn" data-action="export">Exporter</button>
       <label class="btn" style="cursor:pointer">Importer<input type="file" accept="application/json" id="import-file" hidden /></label>
@@ -789,6 +843,7 @@ function renderOnboarding() {
         <button class="btn white grow" data-action="onb-next">${last ? "C'est parti" : "Continuer"}</button>
       </div>
     </div>`;
+  frenchSpaces($app);
 }
 
 const FIELD_ERRORS = { age: "L'âge doit être entre 14 et 90 ans.", height: "La taille doit être entre 120 et 230 cm.", weight: "Le poids doit être entre 30 et 300 kg." };
@@ -865,7 +920,7 @@ function finishWorkout({ stale = false } = {}) {
 
 // ═════════════════════════ Minuteurs et écran allumé
 
-let restEnd = 0, restTotal = 0, restTimer = null, elapsedTimer = null, wakeLock = null;
+let restEnd = 0, restTotal = 0, restTimer = null, elapsedTimer = null, liveTimer = null, wakeLock = null;
 
 function startRest(sec) {
   restEnd = Date.now() + sec * 1000;
@@ -926,13 +981,15 @@ function afterRender(r) {
   requestAnimationFrame(() => requestAnimationFrame(() => document.querySelectorAll(".gauge .val").forEach((c) => c.setAttribute("stroke-dasharray", c.dataset.to))));
   if (r === "today" && ringScore != null) ringFrom = ringScore;
   startFigures($app);
+  clearInterval(liveTimer);
+  const live = document.getElementById("live-t");
+  if (live) liveTimer = setInterval(() => { const a = store.get().active; if (a) live.textContent = liveText(a); }, 1000);
   if (r === "workout") {
     const a = store.get().active;
     clearInterval(elapsedTimer);
     const tick = () => {
-      const sec = Math.floor((Date.now() - a.startedAt) / 1000);
       const el = document.getElementById("elapsed");
-      if (el) el.textContent = sec >= 3600 ? `${Math.floor(sec / 3600)}h${String(Math.floor(sec / 60) % 60).padStart(2, "0")}` : `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+      if (el) el.textContent = clock(Math.floor((Date.now() - a.startedAt) / 1000));
     };
     tick();
     elapsedTimer = setInterval(tick, 1000);
@@ -1012,20 +1069,106 @@ function autoSync() {
 // ═════════════════════════ Panneaux
 
 let sheetOpener = null;
+// Un panneau ouvert = une entrée d'historique, pour que le geste retour le ferme. `pendingBack` : fermeture
+// demandée par l'app, consommée au tour suivant sauf si un autre panneau s'ouvre aussitôt (même entrée).
+let sheetEntry = false, pendingBack = null;
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 function openSheet(html, onMount, { lvl = "" } = {}) {
-  sheetOpener = document.activeElement;
+  if (pendingBack) { clearTimeout(pendingBack); pendingBack = null; }
+  else if (!sheetEntry) { history.pushState({ sheet: 1 }, ""); sheetEntry = true; }
+  if (!$sheetRoot.querySelector(".sheet:not(.closing)")) sheetOpener = document.activeElement;
   $sheetRoot.innerHTML = `<div class="sheet-backdrop" data-action="close-sheet"></div><div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title" ${lvl ? `data-lvl="${lvl}"` : ""}><div class="grab"></div><button class="icon-btn sm sheet-close" data-action="close-sheet" aria-label="Fermer">${ICON.close}</button>${html}</div>`;
   const sheet = $sheetRoot.querySelector(".sheet");
+  frenchSpaces(sheet);
   onMount?.(sheet);
+  dragToClose(sheet);
   startFigures(sheet);
   if (!sheet.contains(document.activeElement)) sheet.querySelector("input, button:not(.sheet-close), [tabindex]")?.focus({ preventScroll: true });
 }
-function closeSheet() {
-  if (!$sheetRoot.innerHTML) return;
-  $sheetRoot.innerHTML = "";
+
+/** `fromHistory` : l'entrée d'historique est déjà partie (retour, changement d'écran). */
+function closeSheet({ fromHistory = false } = {}) {
+  if (!fromHistory && sheetEntry && !pendingBack) pendingBack = setTimeout(() => { pendingBack = null; sheetEntry = false; history.back(); });
+  const sheet = $sheetRoot.querySelector(".sheet:not(.closing)");
+  if (!sheet) return;
+  const done = () => { if (sheet.isConnected) $sheetRoot.innerHTML = ""; };
+  if (reducedMotion) done();
+  else {
+    sheet.classList.add("closing");
+    $sheetRoot.querySelector(".sheet-backdrop")?.classList.add("closing");
+    sheet.addEventListener("animationend", done, { once: true });
+    setTimeout(done, 320);
+  }
   sheetOpener?.focus?.({ preventScroll: true });
   sheetOpener = null;
+}
+
+/** Oublie l'entrée d'historique du panneau et le ferme. Renvoie vrai s'il y en avait une. */
+function dropSheetEntry() {
+  if (!sheetEntry) return false;
+  clearTimeout(pendingBack);
+  pendingBack = null;
+  sheetEntry = false;
+  closeSheet({ fromHistory: true });
+  return true;
+}
+
+/** Glisser le panneau vers le bas pour le fermer (depuis le haut de son contenu). */
+function dragToClose(sheet) {
+  const backdrop = $sheetRoot.querySelector(".sheet-backdrop");
+  let y0 = null, dy = 0, t0 = 0, dragging = false;
+  const reset = () => {
+    sheet.style.transition = "transform .25s cubic-bezier(.2,.8,.2,1)";
+    sheet.style.transform = backdrop.style.opacity = "";
+  };
+  sheet.addEventListener("touchstart", (e) => {
+    y0 = sheet.scrollTop <= 0 && e.touches.length === 1 ? e.touches[0].clientY : null;
+    dy = 0; dragging = false; t0 = performance.now();
+  }, { passive: true });
+  sheet.addEventListener("touchmove", (e) => {
+    if (y0 == null) return;
+    dy = e.touches[0].clientY - y0;
+    if (!dragging) {
+      if (dy < -6) { y0 = null; return; } // vers le haut : le contenu défile normalement
+      if (dy < 8) return;
+      dragging = true;
+    }
+    e.preventDefault();
+    sheet.style.transition = "none";
+    sheet.style.transform = `translate(-50%, ${Math.max(0, dy)}px)`;
+    backdrop.style.opacity = String(Math.max(0.2, 1 - dy / sheet.offsetHeight));
+  }, { passive: false });
+  const end = () => {
+    if (!dragging) return void (y0 = null);
+    const fast = dy / (performance.now() - t0) > 0.6;
+    y0 = null; dragging = false;
+    if (dy > Math.min(140, sheet.offsetHeight * 0.3) || (fast && dy > 40)) closeSheet();
+    else reset();
+  };
+  sheet.addEventListener("touchend", end);
+  sheet.addEventListener("touchcancel", () => { if (dragging) { dragging = false; reset(); } y0 = null; });
+}
+
+// Typographie française : espace insécable avant : ; ? ! » et après «, pour ne jamais les laisser seuls en début de ligne
+const fr = (t) => t.replace(/ ([:;?!»])/g, " $1").replace(/« /g, "« ");
+function frenchSpaces(root) {
+  const skip = /^(INPUT|TEXTAREA|SCRIPT|STYLE|CODE)$/;
+  const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, { acceptNode: (n) => (skip.test(n.parentNode.nodeName) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT) });
+  for (let n = walk.nextNode(); n; n = walk.nextNode()) if (/ [:;?!»]|« /.test(n.nodeValue)) n.nodeValue = fr(n.nodeValue);
+}
+
+/** RPE : l'effort ressenti en fin de série, traduit en répétitions gardées en réserve. */
+function rpeSheet(target) {
+  const rows = [[10, "Échec : plus une seule rep possible"], [9, "Encore 1 rep en réserve"], [8, "Encore 2 reps en réserve"], [7, "Encore 3 reps en réserve"], [6, "Encore 4 reps en réserve"], [5, "Facile, comme un échauffement"]];
+  const lo = Math.floor(target), hi = Math.ceil(target);
+  const spare = lo === hi ? `${10 - lo} rep${10 - lo > 1 ? "s" : ""}` : `${10 - hi} à ${10 - lo} reps`;
+  openSheet(`
+    <h2 id="sheet-title">RPE</h2>
+    <p class="muted" style="margin:6px 0 16px;font-weight:600">L'effort ressenti en fin de série, sur 10. Note-le après chaque série : l'app s'en sert pour régler tes charges.</p>
+    <ol class="rpe-list">${rows.map(([n, txt]) => `<li class="${n === lo || n === hi ? "cur" : ""}"><b>${n}</b><span>${txt}</span></li>`).join("")}</ol>
+    <p class="small muted" style="margin-top:14px;font-weight:600">Cible de cet exercice : <b style="color:var(--text)">RPE ${kg(target)}</b>, soit environ ${spare} en réserve.</p>`,
+    null, { lvl: store.get().active?.level || "" });
 }
 
 /** Fiche d'un exercice : schéma animé, muscles, consignes ; « Remplacer » pendant la séance. */
@@ -1037,7 +1180,7 @@ function exSheet(id, ei) {
   const names = (list) => list.map((m) => MUSCLES[m]).join(", ");
   const equip = ex.equip ? ex.equip.map((e) => ({ gym: "Salle", db: "Haltères", bw: "Poids du corps" })[e]) : [];
   openSheet(`
-    <div class="ex-hero">${figure(id, { animate: true })}</div>
+    <div class="ex-hero">${figure(id, { player: true })}</div>
     <h2 id="sheet-title">${esc(ex.name)}</h2>
     <div class="tags" style="margin-top:8px">
       ${ex.compound != null ? `<span class="tag">${ex.compound ? "Polyarticulaire" : "Isolation"}</span>` : ""}
@@ -1258,6 +1401,7 @@ $app.addEventListener("click", (ev) => {
       });
     case "start": return startWorkout();
     case "leave-workout": return go("today");
+    case "resume": return go("workout");
     case "cancel-workout":
       if (confirm("Supprimer cette séance ? Rien ne sera enregistré.")) { store.update((st) => { st.active = null; }); stopRest(); go("today"); }
       return;
@@ -1267,17 +1411,17 @@ $app.addEventListener("click", (ev) => {
       const ei = +b.dataset.ei, si = +b.dataset.si;
       const cur = store.get().active.exercises[ei];
       const x0 = cur.sets[si];
-      if (!x0.done && (x0.reps == null || x0.reps === "")) {
-        toast(cur.timed ? "Indique la durée tenue avant de valider" : "Indique tes répétitions avant de valider");
-        return document.querySelector(`input[data-field="reps"][data-ei="${ei}"][data-si="${si}"]`)?.focus();
-      }
+      // Série vide : « faite comme prévu », au bas de la fourchette (modifiable ; ne fait pas monter la charge seule)
+      const asPlanned = !x0.done && (x0.reps == null || x0.reps === "");
       let nowDone = false;
       store.update((st) => {
         const e = st.active.exercises[ei];
         const x = e.sets[si];
+        if (asPlanned) x.reps = (x.target || e.repsTarget)[0];
         x.done = !x.done;
         nowDone = x.done;
         st.active.lastActivity = Date.now();
+        if (x.done) st.active.focus = ei;
         // Propage la charge aux séries suivantes non faites (après le top set : −10 %)
         if (x.done && x.weight != null) {
           const next = x.top ? Math.round((x.weight * 0.9) / 1.25) * 1.25 : x.weight;
@@ -1286,6 +1430,10 @@ $app.addEventListener("click", (ev) => {
       });
       if (nowDone) {
         navigator.vibrate?.(30);
+        if (asPlanned && !toldAsPlanned) {
+          toldAsPlanned = true;
+          toast(`${x0.reps}${cur.timed ? " s notées" : " reps notées"} · touche le chiffre pour corriger`);
+        }
         const a = store.get().active;
         const e = a.exercises[ei];
         const exDone = e.sets.every((x) => x.done);
@@ -1313,6 +1461,7 @@ $app.addEventListener("click", (ev) => {
     case "rest-skip": return stopRest();
     case "add-weight": return weightSheet();
     case "history": return historySheet(+b.dataset.i);
+    case "rpe-info": return rpeSheet(+b.dataset.rpe);
     case "lib-group": libGroup = b.dataset.g; return render();
     case "lib-mine": libMine = !libMine; return render();
     case "set-profile": {
@@ -1394,9 +1543,9 @@ document.addEventListener("keydown", (ev) => {
   }
 });
 
-let toastTimer;
+let toastTimer, toldAsPlanned = false;
 function toast(msg) {
-  $toast.textContent = msg;
+  $toast.textContent = fr(msg);
   $toast.classList.add("show");
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => $toast.classList.remove("show"), 2600);
@@ -1412,4 +1561,6 @@ if ("serviceWorker" in navigator && location.protocol !== "file:") {
 // Script Google préchargé : la fenêtre de connexion s'ouvre directement au clic
 if (store.get().google.connected) gh.loadGis().catch(() => {});
 
+// Rechargé avec un panneau ouvert : son entrée d'historique ne mène plus nulle part, on la retire
+if (history.state?.sheet) history.back();
 render();

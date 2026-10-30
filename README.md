@@ -63,6 +63,9 @@ superset quand le temps manque, séance tenue dans la durée choisie, charges ti
 
 - `js/engine.js` : énergie du jour, génération des séances, progression, nutrition
 - `js/exercises.js` : bibliothèque d'exercices (muscles, consignes) et routines de récupération
-- `js/figures.js` : schémas SVG animés des exercices et carte des muscles
+- `js/figures.js` : schémas SVG animés des exercices (personnage articulé, tempo et consignes par exercice,
+  lecteur avec pause et ralenti dans la fiche) et carte des muscles
+- `tools/check-figures.mjs` : à lancer après toute retouche d'un schéma (`node tools/check-figures.mjs`) ; échoue si
+  un schéma est figé, saute, sort du cadre, passe sous le sol ou laisse glisser un appui
 - `js/google-health.js` : OAuth + lecture des données Google Health (chacune facultative)
 - `js/app.js` : interface · `js/store.js` : données (stockées localement sur l'appareil)
